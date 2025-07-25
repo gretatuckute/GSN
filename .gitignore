@@ -3,12 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-**/z-old/*
-**/.DS_Store
-**/*.csv
-**/*.pdf
-
-
 # C extensions
 *.so
 

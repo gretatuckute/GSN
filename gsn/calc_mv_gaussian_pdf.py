@@ -41,12 +41,7 @@ def calc_mv_gaussian_pdf(pts, mn, c, wantomitexp = 0):
         f = []
         return f, err
     
-    try:
-        pts = np.matmul(pts, np.linalg.pinv(T))
-    except:
-        err = 1
-        f = []
-        return f, err
+    pts = np.matmul(pts, np.linalg.inv(T))
         
     # finish up
     f = -0.5 * np.sum(pts**2,axis = 1) - np.sum(np.log(np.diag(T))) - d*np.log(2*math.pi)/2

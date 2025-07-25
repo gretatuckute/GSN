@@ -104,12 +104,8 @@ function [nc,ncdist,results] = rsanoiseceiling(data,opt)
 %             distribution. Note that this is computed on the raw
 %             estimated covariances. Also, note that we apply positive 
 %             rectification (to prevent non-sensical negative ncsnr values).
-%     numiters - the number of iterations used in the biconvex optimization.
-%                0 means the first estimate was already positive semi-definite.
 %
 % History:
-% - 2025/07/11 - add internal case of NaNs allowed for GSN
-% - 2024/08/24 - add results.numiters
 % - 2024/01/05 - (1) major change to use the biconvex optimization procedure --
 %                    we now have cSb and cNb as the final estimates;
 %                (2) cSb no longer has the scaling baked in and instead we 
@@ -128,10 +124,6 @@ function [nc,ncdist,results] = rsanoiseceiling(data,opt)
 %     1 means use no scaling.
 %     2 means scale to match the un-regularized average variance
 %     Default: 0.
-%
-% internal notes:
-% - we allow GSN to support data with NaN!! (see performgsn.m)
-%   - note that this is allowed ONLY when opt.mode is not 0
 
 % inputs
 if ~exist('opt','var') || isempty(opt)
@@ -191,14 +183,6 @@ opt.scs = unique(opt.scs);
 assert(all(opt.scs>=0));
 assert(opt.simchunk >= 2);
 
-% check whether we are in the special case of uneven trials across conditions
-isuneven = any(isnan(data(:)));
-if isuneven  % if it seems like it is, let's do some stringent sanity checks
-  validcnt = sum(~any(isnan(data),1),3);  % 1 x conditions with number of trials with no NaNs
-  assert(all(validcnt >= 1),'all conditions must have at least 1 valid trial (no NaNs)');
-  assert(opt.mode ~= 0);  % we are NOT compatible with the RSA mode
-end
-
 %% %%%%% ESTIMATION OF COVARIANCES
 
 % estimate noise covariance
@@ -208,36 +192,7 @@ if opt.wantverbose, fprintf('done.\n');, end
 
 % estimate data covariance
 if opt.wantverbose, fprintf('Estimating data covariance...');, end
-if isuneven
-
-  % this is a tricky case. we use the maximum number of trials such
-  % that all conditions have at least that many valid trials.
-  % we randomly pull from the available valid trials to meet that
-  % constraint. we mangle data to become this new subset.
-  % we also change ntrial to reflect this new "faked" data subset.
-  ntrial = min(validcnt);  % number of trials that we will enforce
-  newdata = cast([],class(data));
-  for p=1:size(data,2)
-    validix = ~any(isnan(data(:,p,:)),1);  % 1 x 1 x trials indicating where valid data is present
-    temp = data(:,p,validix);  % voxels x 1 x validtrials
-    ix = deterministic_randperm(size(temp,3));
-    newdata(:,p,:) = temp(:,1,ix(1:ntrial));  % note that trial order may be shuffled! (no big deal)
-  end
-  data = newdata; clear newdata;
-
-  % now, data has been mangled/truncated!!! beware!
-  
-  % figure out ntrial to use in biconvex optimization (on average, how many trials were there?)
-  ntrialBC = sum(validcnt(validcnt>1))/ncond;
-  if ntrialBC < 1
-    warning('ntrialBC is lopsided! setting to 1');
-    ntrialBC = 1;
-  end
-
-else
-  ntrialBC = ntrial;  % in the standard case, ntrial in biconvex optimization is just ntrial
-end
-[mnD,cD,shrinklevelD,nllD] = calcshrunkencovariance(mean(data,3)',[],opt.shrinklevels,1);
+[mnD,cD,shrinklevelD,nllD] = calcshrunkencovariance(mean(data,3)',        [],opt.shrinklevels,1);
 if opt.wantverbose, fprintf('done.\n');, end
 
 % estimate signal covariance
@@ -259,7 +214,6 @@ if opt.wantverbose, fprintf('Performing biconvex optimization...');, end
 cNb = cN;
 cSb_old = cS;
 cNb_old = cN;
-numiters = 0;  % numiters == 0 means the first estimate was already PSD
 
 while 1
 
@@ -268,30 +222,23 @@ while 1
   cSb = constructnearestpsdcovariance(temp);
 
   % calculate new estimate of cNb
-  temp = (ncond*(ntrialBC-1)*ntrialBC^2) / (ncond*ntrialBC^2*(ntrialBC-1)+ncond-1) * cN + (ncond-1) / (ncond*ntrialBC^2*(ntrialBC-1)+ncond-1) * ntrialBC * (cD - cSb);
+  temp = (ncond*(ntrial-1)*ntrial^2) / (ncond*ntrial^2*(ntrial-1)+ncond-1) * cN + (ncond-1) / (ncond*ntrial^2*(ntrial-1)+ncond-1) * ntrial * (cD - cSb);
   cNb = constructnearestpsdcovariance(temp);
 
   % check deltas
-  if size(cSb,1)==1  % handle special case of only one unit
-    if abs(cSb_old - cSb) < 1e-5 && abs(cNb_old - cNb) < 1e-5
-      break;
-    end
-  else
-    cScheck = corr(cSb_old(:),cSb(:));
-    cNcheck = corr(cNb_old(:),cNb(:));
-    if 0
-      fprintf('1: cSb old to new is %.5f\n',cScheck);
-      fprintf('2: cNb old to new is %.5f\n',cNcheck);
-    end
-  
-    % convergence?
-    if cScheck > 0.999 && cNcheck > 0.999
-      break;
-    end
+  cScheck = corr(cSb_old(:),cSb(:));
+  cNcheck = corr(cNb_old(:),cNb(:));
+  if 0
+    fprintf('1: cSb old to new is %.5f\n',cScheck);
+    fprintf('2: cNb old to new is %.5f\n',cNcheck);
   end
   
+  % convergence?
+  if cScheck > 0.999 && cNcheck > 0.999
+    break;
+  end
+
   % update
-  numiters = numiters + 1;
   cSb_old = cSb;
   cNb_old = cNb;
   
@@ -393,7 +340,7 @@ case 0
     while 1
       for nn=1:length(splitnums)
         for si=iicur:iimax
-          temp = deterministic_randperm(ntrial);
+          temp = randperm(ntrial);
           datasplitr(nn,si) = nanreplace(opt.comparefun(opt.rdmfun(mean(data(:,:,temp(1:splitnums(nn))),3)), ...
                                                     opt.rdmfun(mean(data(:,:,temp(splitnums(nn)+(1:splitnums(nn)))),3))));
         end
@@ -483,19 +430,15 @@ end
 
 %% %%%%% MONTE CARLO SIMULATIONS FOR RSA NOISE CEILING
 
+if opt.wantverbose, fprintf('Performing Monte Carlo simulations...');, end
+
 % perform Monte Carlo simulations
-if opt.ncsims > 0
-  if opt.wantverbose, fprintf('Performing Monte Carlo simulations...');, end
-  ncdist = zeros(1,opt.ncsims);
-  for rr=1:opt.ncsims
-    signal = mvnrnd(mnS,cSb_rsa,opt.ncconds);           % ncconds x voxels
-    noise  = mvnrnd(mnN,cNb/opt.nctrials,opt.ncconds);  % ncconds x voxels
-    measurement = signal + noise;                      % ncconds x voxels
-    ncdist(rr) = nanreplace(opt.comparefun(opt.rdmfun(signal'),opt.rdmfun(measurement')));
-  end
-else
-  % no simulations requested
-  ncdist = [];
+ncdist = zeros(1,opt.ncsims);
+for rr=1:opt.ncsims
+  signal = mvnrnd(mnS,cSb_rsa,opt.ncconds);           % ncconds x voxels
+  noise  = mvnrnd(mnN,cNb/opt.nctrials,opt.ncconds);  % ncconds x voxels
+  measurement = signal + noise;                      % ncconds x voxels
+  ncdist(rr) = nanreplace(opt.comparefun(opt.rdmfun(signal'),opt.rdmfun(measurement')));
 end
 
 if opt.wantverbose, fprintf('done.\n');, end
@@ -503,15 +446,11 @@ if opt.wantverbose, fprintf('done.\n');, end
 %% %%%%% FINISH UP
 
 % compute median across simulations
-if opt.ncsims > 0
-  nc = median(ncdist);
-else
-  nc = NaN;
-end
+nc = median(ncdist);
 
 % prepare additional outputs
 clear results;
-varstosave = {'mnN' 'cN' 'cNb' 'shrinklevelN' 'shrinklevelD' 'mnS' 'cS' 'cSb' 'sc' 'splitr' 'ncsnr' 'numiters'};
+varstosave = {'mnN' 'cN' 'cNb' 'shrinklevelN' 'shrinklevelD' 'mnS' 'cS' 'cSb' 'sc' 'splitr' 'ncsnr'};
 for p=1:length(varstosave)
   results.(varstosave{p}) = eval(varstosave{p});
 end
@@ -598,11 +537,7 @@ if opt.mode == 0 && ~isequal(opt.wantfig,0)
   set(straightline(sc,'v','k-'),'LineWidth',3);
   xlabel('Scaling factor');
   ylabel('R^2 between model and data (%)');
-  if opt.ncsims > 0
-    title(sprintf('sc=%.2f, nc=%.3f +/- %.3f',sc,nc,iqr(ncdist)/2/sqrt(length(ncdist))));
-  else
-    title(sprintf('sc=%.2f, nc=%.3f (no sims)',sc,nc));
-  end
+  title(sprintf('sc=%.2f, nc=%.3f +/- %.3f',sc,nc,iqr(ncdist)/2/sqrt(length(ncdist))));
   
   if isequal(opt.wantfig,1)
   else
